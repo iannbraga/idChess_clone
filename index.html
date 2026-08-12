@@ -41,7 +41,7 @@
     background: #000;
   }
   #videoContainer { position: relative; }
-  #overlay { position: absolute; top: 0; left: 0; pointer-events: auto; background: transparent; cursor: crosshair; }
+  #overlay { position: absolute; top: 0; left: 0; pointer-events: auto; background: transparent; cursor: crosshair; touch-action: none; }
   .controls {
     display: flex;
     gap: 10px;
@@ -123,6 +123,7 @@ const contextWarning = document.getElementById('contextWarning');
 let corners = []; // pontos clicados na ordem: TL, TR, BR, BL
 let streamActive = false;
 let cameraStream = null;
+let lastCornerTime = 0;
 
 // --- Checagem de contexto seguro: getUserMedia exige HTTPS ou localhost ---
 function checkSecureContext() {
@@ -212,8 +213,13 @@ function resizeOverlay() {
 }
 window.addEventListener('resize', () => { if (streamActive) resizeOverlay(); });
 
-overlay.addEventListener('click', (e) => {
+overlay.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
   if (!streamActive || corners.length >= 4) return;
+  const now = Date.now();
+  if (now - lastCornerTime < 250) return; // evita registro duplicado (touch + mouse sintético)
+  lastCornerTime = now;
+
   const rect = overlay.getBoundingClientRect();
   const scaleX = overlay.width / rect.width;
   const scaleY = overlay.height / rect.height;
