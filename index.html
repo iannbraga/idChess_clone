@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>idChess Protótipo - Detecção de Tabuleiro</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1a1a1a;
+    color: #eee;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  h1 { font-size: 1.3rem; margin: 0; color: #fff; }
+  .subtitle { color: #999; font-size: 0.9rem; margin-top: -12px; text-align: center; }
+  .panels {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .panel {
+    background: #242424;
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel h2 { font-size: 0.95rem; margin: 0; color: #bbb; font-weight: 600; }
+  canvas, video {
+    border-radius: 6px;
+    max-width: 480px;
+    width: 100%;
+    background: #000;
+  }
+  #videoContainer { position: relative; }
+  #overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    background: #3a7bd5;
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #4a8be5; }
+  button:disabled { background: #444; cursor: not-allowed; }
+  button.secondary { background: #444; }
+  button.secondary:hover { background: #555; }
+  #status {
+    font-size: 0.85rem;
+    color: #ffb84d;
+    min-height: 20px;
+    text-align: center;
+  }
+  .corner-list {
+    font-size: 0.8rem;
+    color: #888;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>♟️ idChess Protótipo</h1>
+<p class="subtitle">Etapa 1: captura da câmera + retificação de perspectiva do tabuleiro<br>Clique nos 4 cantos do tabuleiro na ordem: superior-esquerdo → superior-direito → inferior-direito → inferior-esquerdo</p>
+
+<div id="status">Carregando OpenCV.js...</div>
+
+<div class="panels">
+  <div class="panel">
+    <h2>Câmera (clique nos 4 cantos)</h2>
+    <div id="videoContainer">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="corner-list" id="cornerList">0/4 cantos marcados</div>
+  </div>
+
+  <div class="panel">
+    <h2>Tabuleiro retificado (8x8)</h2>
+    <canvas id="output" width="480" height="480"></canvas>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="permBtn">🎥 Solicitar permissão da câmera</button>
+  <button id="startBtn" disabled>Iniciar câmera</button>
+  <button id="resetBtn" class="secondary">Reiniciar cantos</button>
+  <button id="captureBtn" disabled>Retificar tabuleiro</button>
+</div>
+<div class="corner-list" id="contextWarning"></div>
+
+<script src="https://docs.opencv.org/4.9.0/opencv.js"></script>
+<script>
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+const output = document.getElementById('output');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const permBtn = document.getElementById('permBtn');
+const resetBtn = document.getElementById('resetBtn');
+const captureBtn = document.getElementById('captureBtn');
+const cornerList = document.getElementById('cornerList');
+const contextWarning = document.getElementById('contextWarning');
+
+let corners = []; // pontos clicados na ordem: TL, TR, BR, BL
+let streamActive = false;
+let cameraStream = null;
+
+// --- Checagem de contexto seguro: getUserMedia exige HTTPS ou localhost ---
+function checkSecureContext() {
+  const isSecure = window.isSecureContext;
+  const isLocalhost = ['localhost', '127.0.0.1'].includes(location.hostname);
+  const isFile = location.protocol === 'file:';
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    contextWarning.style.color = '#ff6b6b';
+    contextWarning.textContent = 'Este navegador não expõe getUserMedia neste contexto (' +
+      (isFile ? 'arquivo aberto via file://' : location.protocol) +
+      '). Sirva o arquivo por HTTP local (ex: "npx serve" ou "python -m http.server") ou abra via HTTPS.';
+    permBtn.disabled = true;
+    return false;
+  }
+  if (!isSecure && !isLocalhost) {
+    contextWarning.style.color = '#ff6b6b';
+    contextWarning.textContent = 'Contexto não seguro detectado. A câmera só funciona em HTTPS ou localhost — abrir o HTML direto (file://) costuma ser bloqueado. Rode um servidor local (ex: "python -m http.server" na pasta e acesse http://localhost:8000) ou hospede com HTTPS.';
+  }
+  return true;
+}
+checkSecureContext();
+
+async function requestCameraPermission() {
+  statusEl.textContent = 'Solicitando permissão da câmera...';
+  contextWarning.textContent = '';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 960 } }
+    });
+    cameraStream = stream;
+    video.srcObject = stream;
+    await video.play();
+    resizeOverlay();
+    streamActive = true;
+    statusEl.textContent = 'Permissão concedida e câmera ativa. Clique nos 4 cantos do tabuleiro.';
+    permBtn.textContent = '✅ Câmera permitida';
+    permBtn.disabled = true;
+    startBtn.disabled = true;
+  } catch (err) {
+    handleCameraError(err);
+  }
+}
+
+function handleCameraError(err) {
+  let msg = 'Erro ao acessar câmera: ' + err.name + ' — ' + err.message;
+  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+    msg = 'Permissão negada. Verifique o ícone de câmera na barra de endereço do navegador e libere o acesso manualmente, depois clique no botão novamente.';
+  } else if (err.name === 'NotFoundError') {
+    msg = 'Nenhuma câmera encontrada neste dispositivo.';
+  } else if (err.name === 'NotReadableError') {
+    msg = 'A câmera está sendo usada por outro aplicativo/aba.';
+  } else if (err.name === 'SecurityError' || location.protocol === 'file:') {
+    msg = 'Bloqueado por contexto inseguro (file://). Rode um servidor local (ex: "python -m http.server") e acesse via http://localhost.';
+  }
+  statusEl.textContent = msg;
+  statusEl.style.color = '#ff6b6b';
+}
+
+permBtn.addEventListener('click', requestCameraPermission);
+
+// --- OpenCV.js carrega de forma assíncrona; cv.onRuntimeInitialized dispara quando pronto ---
+function onOpenCvReady() {
+  statusEl.textContent = 'OpenCV.js pronto. Clique em "Iniciar câmera".';
+  startBtn.disabled = false;
+}
+if (typeof cv !== 'undefined' && cv['onRuntimeInitialized']) {
+  cv['onRuntimeInitialized'] = onOpenCvReady;
+} else {
+  // fallback caso o script já tenha carregado antes deste ponto
+  var checkCv = setInterval(() => {
+    if (typeof cv !== 'undefined' && cv.Mat) {
+      clearInterval(checkCv);
+      onOpenCvReady();
+    }
+  }, 200);
+}
+
+startBtn.addEventListener('click', requestCameraPermission);
+
+function resizeOverlay() {
+  const rect = video.getBoundingClientRect();
+  overlay.width = video.videoWidth || rect.width;
+  overlay.height = video.videoHeight || rect.height;
+  overlay.style.width = rect.width + 'px';
+  overlay.style.height = rect.height + 'px';
+}
+window.addEventListener('resize', () => { if (streamActive) resizeOverlay(); });
+
+overlay.addEventListener('click', (e) => {
+  if (!streamActive || corners.length >= 4) return;
+  const rect = overlay.getBoundingClientRect();
+  const scaleX = overlay.width / rect.width;
+  const scaleY = overlay.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  corners.push({ x, y });
+  drawCorners();
+  updateCornerList();
+  if (corners.length === 4) {
+    captureBtn.disabled = false;
+    statusEl.textContent = '4 cantos marcados. Clique em "Retificar tabuleiro".';
+  }
+});
+
+function drawCorners() {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.strokeStyle = '#3a7bd5';
+  octx.lineWidth = 3;
+  octx.fillStyle = '#ffb84d';
+
+  corners.forEach((c, i) => {
+    octx.beginPath();
+    octx.arc(c.x, c.y, 8, 0, Math.PI * 2);
+    octx.fill();
+    octx.fillStyle = '#fff';
+    octx.font = 'bold 16px sans-serif';
+    octx.fillText(i + 1, c.x + 12, c.y - 12);
+    octx.fillStyle = '#ffb84d';
+  });
+
+  if (corners.length > 1) {
+    octx.beginPath();
+    octx.moveTo(corners[0].x, corners[0].y);
+    for (let i = 1; i < corners.length; i++) octx.lineTo(corners[i].x, corners[i].y);
+    if (corners.length === 4) octx.closePath();
+    octx.stroke();
+  }
+}
+
+function updateCornerList() {
+  const labels = ['Superior-Esq', 'Superior-Dir', 'Inferior-Dir', 'Inferior-Esq'];
+  cornerList.textContent = corners.length === 0
+    ? '0/4 cantos marcados'
+    : `Marcado: ${corners.map((_, i) => labels[i]).join(', ')}`;
+}
+
+resetBtn.addEventListener('click', () => {
+  corners = [];
+  captureBtn.disabled = true;
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  updateCornerList();
+  statusEl.textContent = 'Cantos reiniciados. Clique nos 4 cantos do tabuleiro.';
+});
+
+captureBtn.addEventListener('click', () => {
+  if (corners.length !== 4) return;
+  rectifyBoard();
+});
+
+function rectifyBoard() {
+  // captura o frame atual do vídeo num canvas temporário do tamanho real do vídeo
+  const tmp = document.createElement('canvas');
+  tmp.width = overlay.width;
+  tmp.height = overlay.height;
+  const tctx = tmp.getContext('2d');
+  tctx.drawImage(video, 0, 0, tmp.width, tmp.height);
+
+  const src = cv.imread(tmp);
+  const dst = new cv.Mat();
+  const dsize = new cv.Size(480, 480);
+
+  const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    corners[0].x, corners[0].y,
+    corners[1].x, corners[1].y,
+    corners[2].x, corners[2].y,
+    corners[3].x, corners[3].y
+  ]);
+  const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    0, 0,
+    480, 0,
+    480, 480,
+    0, 480
+  ]);
+
+  const M = cv.getPerspectiveTransform(srcTri, dstTri);
+  cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+
+  cv.imshow('output', dst);
+
+  drawGrid8x8();
+
+  src.delete(); dst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
+  statusEl.textContent = 'Tabuleiro retificado! Ajuste os cantos e retifique novamente se necessário.';
+}
+
+function drawGrid8x8() {
+  const octx2 = output.getContext('2d');
+  octx2.strokeStyle = 'rgba(255,184,77,0.6)';
+  octx2.lineWidth = 1;
+  const step = 480 / 8;
+  for (let i = 1; i < 8; i++) {
+    octx2.beginPath();
+    octx2.moveTo(i * step, 0);
+    octx2.lineTo(i * step, 480);
+    octx2.stroke();
+    octx2.beginPath();
+    octx2.moveTo(0, i * step);
+    octx2.lineTo(480, i * step);
+    octx2.stroke();
+  }
+}
+</script>
+</body>
+</html>
